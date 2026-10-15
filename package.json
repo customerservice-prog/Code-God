@@ -1,0 +1,13 @@
+{
+  "name": "code-god",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A self-hosted AI coding workspace for Pineda Cloud.",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check.mjs"
+  }
+}
