@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createStore } from './lib/store.mjs';
 import { createAgent, modelStatus } from './lib/agent.mjs';
-import { scan, readText, writeText, resolveFile, fileMap, zip, unzip, safePath, ignored, LIMITS } from './lib/files.mjs';
+import { scan, readText, writeText, resolveFile, fileMap, restoreFiles, zip, unzip, safePath, ignored, LIMITS } from './lib/files.mjs';
 import { importGithub, openPullRequest } from './lib/github.mjs';
 import { dockerAvailable, runCheck, CHECKS } from './lib/runner.mjs';
 
@@ -21,6 +21,17 @@ async function body(req) {
 function base64(value) {
   if(typeof value!=='string' || value.length>29*1024*1024 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length%4) throw new Error('Invalid file encoding.');
   return Buffer.from(value,'base64');
+}
+function uploadedFiles(b) {
+  let files;
+  if(b.zipBase64)files=unzip(base64(b.zipBase64),true);
+  else {
+    if(!Array.isArray(b.files) || !b.files.length || b.files.length>LIMITS.files)throw new Error('Choose 1–2,000 source files.');
+    files=new Map();let total=0;
+    for(const f of b.files) {if(typeof f.path!=='string')throw new Error('File path is missing.');if(ignored(f.path))continue;safePath(f.path);const bytes=base64(f.contentBase64);total+=bytes.length;if(bytes.length>LIMITS.file || total>LIMITS.total)throw new Error('File or project size limit exceeded.');if(files.has(f.path))throw new Error('Duplicate file path.');files.set(f.path,bytes);}
+  }
+  if(!files.size)throw new Error('No editable source files were found.');
+  return files;
 }
 function template(name) {
   if(name==='website') return new Map([['index.html',Buffer.from('<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>My project</title><link rel="stylesheet" href="style.css"></head><body><main><span>YOUR NEXT IDEA</span><h1>Make something great.</h1><p>Describe your changes in Code God to build this project.</p><button id="hello">Try it</button><p id="message" aria-live="polite"></p></main><script src="app.js"></script></body></html>\n')],['style.css',Buffer.from('body{margin:0;background:#f5f2ed;color:#172321;font:18px system-ui;display:grid;place-items:center;min-height:100vh}main{padding:48px;max-width:800px}span{font-size:12px;letter-spacing:.2em}h1{font-size:clamp(42px,8vw,86px);line-height:1.05;letter-spacing:-.05em}p{color:#5b6761;line-height:1.7}button{background:#193e32;color:white;padding:14px 24px;border:0;border-radius:8px;font:inherit;cursor:pointer}\n')],['app.js',Buffer.from('document.querySelector("#hello").addEventListener("click",()=>{document.querySelector("#message").textContent="Your project is working.";});\n')],['README.md',Buffer.from('# My website\n\nA static HTML, CSS, and JavaScript project. Open Preview in Code God.\n')]]);
@@ -72,14 +83,7 @@ export async function startServer(options={}) {
       if(pathname==='/api/projects' && req.method==='GET')return json(res,200,store.list());
       if(pathname==='/api/projects' && req.method==='POST') {const b=await body(req);return json(res,201,await store.create(b.name,{type:'new'},template(b.template)));}
       if(pathname==='/api/import/files' && req.method==='POST') {
-        const b=await body(req);let files;
-        if(b.zipBase64)files=unzip(base64(b.zipBase64),true);
-        else {
-          if(!Array.isArray(b.files) || !b.files.length || b.files.length>LIMITS.files)throw new Error('Choose 1–2,000 source files.');
-          files=new Map();let total=0;
-          for(const f of b.files) {if(typeof f.path!=='string')throw new Error('File path is missing.');if(ignored(f.path))continue;safePath(f.path);const bytes=base64(f.contentBase64);total+=bytes.length;if(bytes.length>LIMITS.file || total>LIMITS.total)throw new Error('File or project size limit exceeded.');if(files.has(f.path))throw new Error('Duplicate file path.');files.set(f.path,bytes);}
-        }
-        if(!files.size)throw new Error('No editable source files were found.');
+        const b=await body(req),files=uploadedFiles(b);
         return json(res,201,await store.create(b.name,{type:'upload'},files));
       }
       if(pathname==='/api/import/github' && req.method==='POST') {
@@ -94,6 +98,17 @@ export async function startServer(options={}) {
       const id=match[1],action=match[2]||'',project=store.get(id),root=store.root(id);
       if(action==='' && req.method==='GET')return json(res,200,{...project,files:await scan(root),messages:store.messages(id),busy:store.busy.has(id),latestRun:store.db.prepare('SELECT id,status FROM runs WHERE project_id=? ORDER BY created DESC LIMIT 1').get(id)||null});
       if(action==='file' && req.method==='GET')return json(res,200,{path:url.searchParams.get('path'),content:await readText(root,url.searchParams.get('path'))});
+      if(action==='attachments' && req.method==='POST') {
+        const b=await body(req),incoming=uploadedFiles(b);store.unlocked(id);store.busy.add(id);
+        try {
+          const current=await fileMap(root),conflicts=[...incoming.keys()].filter(name=>current.has(name));
+          if(conflicts.length && b.overwrite!==true)return json(res,409,{error:'Some attached files already exist.',conflicts});
+          const merged=new Map([...current,...incoming]);
+          if(merged.size>LIMITS.files || [...merged.values()].reduce((sum,value)=>sum+value.length,0)>LIMITS.total)throw new Error('The combined project exceeds the file or size limit.');
+          await store.snapshot(id,'Before attaching '+incoming.size+' files');
+          await restoreFiles(root,merged);store.touch(id);return json(res,200,{attached:incoming.size});
+        } finally {store.busy.delete(id);}
+      }
       if(action==='file' && ['PUT','DELETE'].includes(req.method)) {
         const b=await body(req);store.unlocked(id);store.busy.add(id);
         try{await store.snapshot(id,(req.method==='DELETE'?'Before deleting ':'Before saving ')+b.path);if(req.method==='DELETE')await fs.unlink(await resolveFile(root,b.path));else await writeText(root,b.path,b.content);store.touch(id);return json(res,200,{saved:true});}finally{store.busy.delete(id);}

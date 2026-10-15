@@ -4,6 +4,8 @@ A self-hosted AI coding workspace. Bring a GitHub repository, a ZIP, a folder, o
 
 This is a working first release, not a feature-equivalent replacement for Codex. The coding model is supplied separately. The interface does not generate code unless a model is connected.
 
+The interface opens to a chat: a conversation in the middle, recent projects in the sidebar, and a message box at the bottom. Describe a project to create it from your first message, paste a GitHub link to import it, or use the **+** button to attach source files, a folder, or a ZIP. In an existing chat, attachments are added to that project; replacing an existing file requires confirmation and keeps a restore point. **Files & preview** opens the optional code/preview/history panel. Enter sends a message; Shift+Enter adds a new line. Unsent drafts stay in the current browser session, and AI activity appears in the conversation while work runs.
+
 ## Start on Windows
 
 1. Install **Node.js 24 or newer** from [nodejs.org](https://nodejs.org/).
